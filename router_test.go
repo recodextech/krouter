@@ -5,18 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
-	"github.com/tryfix/kstream/admin"
-	"github.com/tryfix/kstream/consumer"
-	"github.com/tryfix/kstream/producer"
-	"github.com/tryfix/log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	"github.com/tryfix/kstream/admin"
+	"github.com/tryfix/kstream/consumer"
+	"github.com/tryfix/kstream/producer"
+	"github.com/tryfix/log"
 )
 
 type testErrorResponse struct {
@@ -41,9 +42,10 @@ func TestHandler_ServeHTTP(t *testing.T) {
 	prod := producer.NewMockProducer(topics)
 	con := consumer.NewMockConsumer(topics)
 
-	router, err := NewRouter(Config{
-		RouterTopic: "Router",
-	},
+	router, err := NewRouter(
+		WithKafkaRouter(Config{
+			RouterTopic: `Router`,
+		}),
 		WithErrorHandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request, err error) error {
 			w.Header().Add("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -89,8 +91,9 @@ func TestHandler_ServeHTTP(t *testing.T) {
 	}
 
 	payloadhandler := new(somehandler)
-
-	h := router.NewHandler(`route1`, fooRequestEncoder{}, somePrehandler, payloadhandler.Handle,
+	router.kafka.enable = true
+	h := router.NewHandler(`route1`, fooRequestEncoder{}, somePrehandler,
+		HandlerWithPostHandler(payloadhandler.Handle),
 		HandlerWithHeader(`user-id`, ParamTypeUuid, nil),
 		HandlerWithHeader(`some-int`, ParamTypeInt, nil),
 		HandlerWithHeader(`some-string`, ParamTypeString, nil),

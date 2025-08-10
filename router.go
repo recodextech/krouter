@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"time"
+
 	"github.com/Shopify/sarama"
 	"github.com/google/uuid"
 	"github.com/tryfix/errors"
@@ -12,9 +15,7 @@ import (
 	"github.com/tryfix/kstream/producer"
 	"github.com/tryfix/log"
 	"github.com/tryfix/metrics"
-	"github.com/tryfix/traceable-context"
-	"net/http"
-	"time"
+	traceable_context "github.com/tryfix/traceable-context"
 )
 
 type group struct {
@@ -32,10 +33,15 @@ func (g *group) OnPartitionAssigned(ctx context.Context, assigned []consumer.Top
 }
 
 type Router struct {
-	c                   consumer.Consumer
-	p                   producer.Producer
+	kafka struct {
+		enable          bool
+		consume         consumer.Consumer
+		produce         producer.Producer
+		boostrapServers []string
+		routerTopic     string
+		consumerGroup   string
+	}
 	handlers            map[string]*Handler
-	routerTopic         string
 	logger              log.Logger
 	preHandlerObserver  metrics.Observer
 	postHandlerObserver metrics.Observer
@@ -54,9 +60,17 @@ type Config struct {
 
 type routerOption func(*Router)
 
+func WithKafkaRouter(con Config) routerOption {
+	return func(r *Router) {
+		r.kafka.boostrapServers = con.BootstrapServers
+		r.kafka.routerTopic = con.RouterTopic
+		r.kafka.consumerGroup = con.ConsumerGroup
+	}
+}
+
 func WithProducer(p producer.Producer) routerOption {
 	return func(r *Router) {
-		r.p = p
+		r.kafka.produce = p
 	}
 }
 
@@ -86,7 +100,7 @@ func WithContextExtractor(fn ContextExtractor) routerOption {
 
 func WithConsumer(c consumer.Consumer) routerOption {
 	return func(r *Router) {
-		r.c = c
+		r.kafka.consume = c
 	}
 }
 
@@ -121,13 +135,10 @@ func WithParamType(name string, decoder func(v string) (interface{}, error)) rou
 	}
 }
 
-func NewRouter(config Config, options ...routerOption) (*Router, error) {
+func NewRouter(options ...routerOption) (*Router, error) {
 	r := &Router{
-		c:                nil,
-		p:                nil,
 		headersFuncs:     map[string]func() string{},
 		handlers:         map[string]*Handler{},
-		routerTopic:      config.RouterTopic,
 		logger:           log.NewNoopLogger(),
 		customParamTypes: map[string]CustomParam{},
 		contextExtractor: func(r *http.Request) context.Context {
@@ -147,10 +158,10 @@ func NewRouter(config Config, options ...routerOption) (*Router, error) {
 		opt(r)
 	}
 
-	if r.c == nil {
+	if len(r.kafka.boostrapServers) > 0 && r.kafka.consumerGroup != "" {
 		cConfig := consumer.NewConsumerConfig()
-		cConfig.BootstrapServers = config.BootstrapServers
-		cConfig.GroupId = config.ConsumerGroup
+		cConfig.BootstrapServers = r.kafka.boostrapServers
+		cConfig.GroupId = r.kafka.consumerGroup
 		cConfig.Version = sarama.V2_4_0_0
 		c, err := consumer.NewConsumer(cConfig, consumer.WithRecordUuidExtractFunc(func(message *data.Record) uuid.UUID {
 			traceId := message.Headers.Read([]byte(`trace_id`))
@@ -165,27 +176,27 @@ func NewRouter(config Config, options ...routerOption) (*Router, error) {
 		if err != nil {
 			return nil, errors.WithPrevious(err, `Router init failed`)
 		}
-		r.c = c
+		r.kafka.consume = c
+		r.kafka.enable = true
 	}
 
-	if r.p == nil {
+	if len(r.kafka.boostrapServers) > 0 {
 		pConfig := producer.NewConfig()
-		pConfig.BootstrapServers = config.BootstrapServers
+		pConfig.BootstrapServers = r.kafka.boostrapServers
 		pConfig.Version = sarama.V2_4_0_0
 		pConfig.RequiredAcks = producer.WaitForAll
 		p, err := producer.NewProducer(pConfig)
 		if err != nil {
 			return nil, errors.WithPrevious(err, `Router init failed`)
 		}
-		r.p = p
+		r.kafka.produce = p
 	}
 
 	return r, nil
 }
 
-func (r *Router) NewHandler(name string, encoder Encoder, preHandler PreRouteHandleFunc, handler PostRouteHandleFunc, options ...handlerOption) http.Handler {
+func (r *Router) NewHandler(name string, encoder Encoder, preHandler PreRouteHandleFunc, options ...handlerOption) http.Handler {
 	h := &Handler{
-		postHandler:      handler,
 		preHandler:       preHandler,
 		encode:           encoder,
 		name:             name,
@@ -211,7 +222,7 @@ func (r *Router) NewHandler(name string, encoder Encoder, preHandler PreRouteHan
 
 func (r *Router) Start() error {
 	// start consumer
-	partitions, err := r.c.Consume([]string{r.routerTopic}, &group{logger: r.logger})
+	partitions, err := r.kafka.consume.Consume([]string{r.kafka.routerTopic}, &group{logger: r.logger})
 	if err != nil {
 		return errors.WithPrevious(err, `Router consumer start failed`)
 	}

@@ -3,6 +3,12 @@ package krouter
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"reflect"
+	"strconv"
+	"time"
+
 	"github.com/Shopify/sarama"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -10,11 +16,6 @@ import (
 	"github.com/tryfix/kstream/data"
 	"github.com/tryfix/log"
 	traceable_context "github.com/tryfix/traceable-context"
-	"io/ioutil"
-	"net/http"
-	"reflect"
-	"strconv"
-	"time"
 )
 
 type InvalidHeaderError struct {
@@ -60,6 +61,12 @@ func (p *Payload) Header(name string) interface{} {
 }
 
 type handlerOption func(*Handler)
+
+func HandlerWithPostHandler(postHandler PostRouteHandleFunc) handlerOption {
+	return func(h *Handler) {
+		h.postHandler = postHandler
+	}
+}
 
 func HandlerWithValidator(v Validator) handlerOption {
 	return func(h *Handler) {
@@ -176,7 +183,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	}
 
 	// read request
-	byt, err := ioutil.ReadAll(r.Body)
+	byt, err := io.ReadAll(r.Body)
 	if err != nil {
 		return errors.WithPrevious(err, fmt.Sprintf(`http request read failed on route [%s]`, h.name))
 	}
@@ -252,21 +259,23 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		h.logger.WarnContext(ctx, `empty uuid in the context setting a new one`)
 		traceId = uuid.New()
 	}
-	// produce to re-route topic
-	p, o, err := h.router.p.Produce(ctx, &data.Record{
-		Key:       []byte(key),
-		Value:     req,
-		Topic:     h.router.routerTopic,
-		Timestamp: time.Now(),
-		Headers: data.RecordHeaders{&sarama.RecordHeader{
-			Key:   []byte(`trace_id`),
-			Value: []byte(traceId.String()),
-		}},
-	})
-	if err != nil {
-		return errors.WithPrevious(err, fmt.Sprintf(`re-route message send error on payload [%v]`, payload))
+	if h.router.kafka.enable {
+		// produce to re-route topic
+		p, o, err := h.router.kafka.produce.Produce(ctx, &data.Record{
+			Key:       []byte(key),
+			Value:     req,
+			Topic:     h.router.kafka.routerTopic,
+			Timestamp: time.Now(),
+			Headers: data.RecordHeaders{&sarama.RecordHeader{
+				Key:   []byte(`trace_id`),
+				Value: []byte(traceId.String()),
+			}},
+		})
+		if err != nil {
+			return errors.WithPrevious(err, fmt.Sprintf(`re-route message send error on payload [%v]`, payload))
+		}
+		h.logger.TraceContext(ctx, fmt.Sprintf(`re-route message [%s] sent to %s[%d] with key [%s] at offset %d`, string(req), h.router.kafka.routerTopic, p, key, o))
 	}
-	h.logger.TraceContext(ctx, fmt.Sprintf(`re-route message [%s] sent to %s[%d] with key [%s] at offset %d`, string(req), h.router.routerTopic, p, key, o))
 
 	if err := h.successHandlerFunc(ctx, w, r, payload); err != nil {
 		h.logger.Error(fmt.Sprintf(`http request success postHandler error due to %s`, err))

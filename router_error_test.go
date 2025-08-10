@@ -5,18 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
-	"github.com/tryfix/kstream/admin"
-	"github.com/tryfix/kstream/consumer"
-	"github.com/tryfix/kstream/producer"
-	"github.com/tryfix/log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	"github.com/tryfix/kstream/admin"
+	"github.com/tryfix/kstream/consumer"
+	"github.com/tryfix/kstream/producer"
+	"github.com/tryfix/log"
 )
 
 type someError struct {
@@ -110,9 +111,7 @@ func TestHandler_ServeHTTP_Error(t *testing.T) {
 	prod := producer.NewMockProducer(topics)
 	con := consumer.NewMockConsumer(topics)
 
-	router, err := NewRouter(Config{
-		RouterTopic: "Router",
-	},
+	router, err := NewRouter(
 		WithErrorHandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request, err error) error {
 			w.Header().Add("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -153,7 +152,8 @@ func TestHandler_ServeHTTP_Error(t *testing.T) {
 	assertSomeString := `random-text`
 	payloadhandler := new(somehandler)
 
-	h := router.NewHandler(`route1`, fooRequestEncoder{}, somePrehandlerError, payloadhandler.Handle,
+	h := router.NewHandler(`route1`, fooRequestEncoder{}, somePrehandlerError,
+		HandlerWithPostHandler(payloadhandler.Handle),
 		HandlerWithHeader(`user-id`, ParamTypeUuid, nil),
 		HandlerWithHeader(`some-int`, ParamTypeInt, nil),
 		HandlerWithHeader(`some-string`, ParamTypeString, nil),
@@ -175,11 +175,13 @@ func TestHandler_ServeHTTP_Error(t *testing.T) {
 		}),
 	)
 
-	go func() {
-		if err := router.Start(); err != nil {
-			t.Error(err)
-		}
-	}()
+	if router.kafka.enable {
+		go func() {
+			if err := router.Start(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
 
 	time.Sleep(1 * time.Second)
 
