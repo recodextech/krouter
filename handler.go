@@ -28,6 +28,11 @@ func (i InvalidHeaderError) Error() string {
 	return fmt.Sprintf(`invalid header value or header does not exist for http header [%s]`, i.Name)
 }
 
+type RequestParams interface {
+	Param(name string) string
+	Header(name string) string
+}
+
 type Payload struct {
 	headers map[string]interface{}
 	params  map[string]interface{}
@@ -202,17 +207,17 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		return errors.WithPrevious(err, fmt.Sprintf(`http request decode error on payload [%s]`, string(byt)))
 	}
 
-	// apply validators
-	for _, validator := range h.validators {
-		if err := validator.Validate(ctx, v, rawHeaders); err != nil {
-			return err
-		}
-	}
-
 	payload := HttpPayload{
 		headers: rawHeaders,
 		params:  rawParams,
 		Body:    v,
+	}
+
+	// apply validators
+	for _, validator := range h.validators {
+		if err := validator.Validate(ctx, v, &payload); err != nil {
+			return err
+		}
 	}
 
 	// call pre route preHandler
